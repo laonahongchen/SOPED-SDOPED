@@ -113,7 +113,7 @@ class AdversarialEnv(multigrid.MultiGridEnv):
     self.wall_locs = []
   
   def get_infos(self):
-    return [self.wall_locs, self.graph, self.s]
+    return [self.wall_locs, self.graph, self.agent_start_pos, self.goal_pos, self.agent_start_dir, self.deliberate_agent_placement]
 
   def _gen_grid(self, width, height):
     """Grid is initially empty, because adversary will create it."""
@@ -181,28 +181,41 @@ class AdversarialEnv(multigrid.MultiGridEnv):
   
   def reset_agent_given_info(self, infoset):
     """"Reset the environment status to the one in the infoset"""
-    self.remove_wall()
+    # self.remove_wall()
 
     self.wall_locs = infoset[0]
     self.graph = infoset[1]
 
-    for a in range(self.n_agents):
-      if self.agent_pos[a] is not None:
-        self.grid.set(self.agent_pos[a][0], self.agent_pos[a][1], None)
+    # for a in range(self.n_agents):
+    #   if self.agent_pos[a] is not None:
+    #     self.grid.set(self.agent_pos[a][0], self.agent_pos[a][1], None)
     
     self.reset_agent_status()
-
-    self.place_agent_at_pos(0, infoset[2], rand_dir=False)
 
     self.reset_metrics()
     self._gen_grid(self.width, self.height)
 
-    image = self.grid.encode()
-    obs = {
-        'image': image,
-        'time_step': [self.adversary_step_count],
-        'random_z': self.generate_random_z()
-    }
+    x, y = infoset[3]
+    self.put_obj(minigrid.Goal(), x, y)
+    self.goal_pos = (x, y)
+
+    for wall_x, wall_y in self.wall_locs:
+      self.put_obj(minigrid.Wall(), wall_x + 1, wall_y + 1)
+      self.n_clutter_placed += 1
+    
+    self.agent_start_pos = infoset[2]
+    self.place_agent_at_pos(0, infoset[2], rand_dir=False)
+    self.agent_start_dir = infoset[4]
+    self.deliberate_agent_placement = infoset[5]
+
+    self.compute_shortest_path()
+    # image = self.grid.encode()
+    # obs = {
+    #     'image': image,
+    #     'time_step': [self.adversary_step_count],
+    #     'random_z': self.generate_random_z()
+    # }
+    obs = self.gen_obs()
 
     return obs
 

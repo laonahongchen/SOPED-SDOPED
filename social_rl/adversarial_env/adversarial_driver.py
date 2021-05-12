@@ -50,6 +50,8 @@ class AdversarialDriver(object):
                disable_tf_function=False,
                debug=False,
                combined_population=False,
+               nearest_metric=False,
+               use_traditional_regret=False,
                flexible_protagonist=False):
     """Runs the environment adversary and agents to collect episodes.
 
@@ -90,7 +92,12 @@ class AdversarialDriver(object):
     self.adversary_agent = adversary_agent
     self.adversary_env = adversary_env
     self.combined_population = combined_population
+    self.nearest_metric = nearest_metric
+    self.has_training = False
     self.flexible_protagonist = flexible_protagonist
+    self.use_traditional_regret = use_traditional_regret
+
+    self.pre_env_diffc = 0
 
   def run(self, random_episodes=False):
     """Runs 3 policies in same environment: environment, agent 1, agent 2."""
@@ -101,7 +108,11 @@ class AdversarialDriver(object):
       agent_r_max, train_idxs = self.randomized_episode()
     elif self.adversary_env is not None:
       # Generates an environment using an adversary.
-      if self.combined_population:
+      if self.use_traditional_regret:
+        agent_r_max, train_idxs = self.env_population_adversarial_episode()
+      elif self.nearest_metric:
+        agent_r_max, train_idxs = self.combined_population_adversarial_domain_randomization_episode()
+      elif self.combined_population:
         agent_r_max, train_idxs = self.combined_population_adversarial_episode()
       else:
         agent_r_max, train_idxs = self.adversarial_episode()
@@ -186,33 +197,155 @@ class AdversarialDriver(object):
 
   def get_env_value(self):
     mns = []
+
     for agent_idx in range(len(self.agent)):
-      obs = self.env.agent_reset()
-      mns.append(self.agent[agent_idx].value_net(obs))
-    return tf.reduce_mean(mns, axis=0)
+      time_step = self.env.reset_agent()
+      
+      batch_size = nest_utils.get_outer_shape(time_step, self.agent[agent_idx].time_step_spec)[0]
+      value_state = self.agent[agent_idx].collect_policy.get_initial_value_state(batch_size)
+
+      value_preds, _ = self.agent[agent_idx].collect_policy.apply_value_network(
+          time_step.observation,
+          time_step.step_type,
+          value_state=value_state,
+          training=False)
+      mns.append(value_preds)
+    # print('get_env_value:')
+    # print(mns)
+    return tf.reduce_mean(mns)
+
+  def env_population_adversarial_episode(self):
+    """Episode in which adversary constructs environment and agents play it."""
+    # Build environment with adversary.
+    if self.has_training:
+      pre_env_diffc = self.pre_env_diffc
+      env_infos = []
+      # vs = []
+      min_env_idx = 0
+      # min_env_diff_v = tf.constant(-1.0)
+      min_env_diff_v = tf.constant(np.inf)
+      for env_idx_itr in range(len(self.adversary_env)):
+        _, _, env_idx = self.run_agent(
+            self.env, self.adversary_env, self.env.reset, self.env.step_adversary, env_idx_itr)
+        
+        env_infos.append(self.env.get_infos())
+        tmp_v = tf.math.abs(self.get_env_value() - pre_env_diffc)
+        # vs.append(tmp_v)
+        
+        # print('prepare to choose:')
+        # print(min_env_diff_v, tmp_v)
+        if (tmp_v < min_env_diff_v).numpy().any():
+          min_env_diff_v = tmp_v
+          min_env_idx = env_idx_itr
+      for env_idx_itr in range(len(self.adversary_env)):
+        if env_idx_itr == min_env_idx:
+          continue
+        self.adversary_env[env_idx_itr].replay_buffer.clear()
+      env_idx = min_env_idx
+      self.env.reset_agent_given_info(env_infos[env_idx])
+    else:
+      _, _, env_idx = self.run_agent(
+        self.env, self.adversary_env, self.env.reset, self.env.step_adversary)
+      self.has_training = True
+    train_idxs = {'adversary_env': [env_idx]}
+
+    # Run protagonist in generated environment.
+    agent_r_avg, agent_r_max, agent_idx = self.run_agent(
+        self.env, self.agent, self.env.reset_agent, self.env.step)
+    train_idxs['agent'] = [agent_idx]
+
+    # Run antagonist in generated environment.
+    if self.adversary_agent:
+      adv_agent_r_avg, adv_agent_r_max, antag_idx = self.run_agent(
+          self.env, self.adversary_agent, self.env.reset_agent, self.env.step)
+      train_idxs['adversary_agent'] = [antag_idx]
+
+    # Use agents' reward to compute and set regret-based rewards for PAIRED.
+    # By default, regret = max(antagonist) - mean(protagonist).
+    if self.adversary_agent:
+      self.adversary_agent[antag_idx].enemy_max = agent_r_max
+      self.agent[agent_idx].enemy_max = adv_agent_r_max
+      if self.flexible_protagonist:
+        # In flexible protagonist case, we find the best-performing agent
+        # and compute regret = max(best) - mean(other).
+        protagonist_better = tf.cast(
+            tf.math.greater(agent_r_max, adv_agent_r_max), tf.float32)
+        env_reward = protagonist_better * (agent_r_max - adv_agent_r_avg) + \
+            (1 - protagonist_better) * (adv_agent_r_max - agent_r_avg)
+        adv_agent_r_max = protagonist_better * agent_r_max + \
+            (1 - protagonist_better) * adv_agent_r_max
+      elif self.adversary_env[env_idx].non_negative_regret:
+        # Clip regret signal so that it can't go below zero.
+        env_reward = tf.math.maximum(adv_agent_r_max - agent_r_avg, 0)
+      else:
+        # Regret = max(antagonist) - mean(protagonist)
+        env_reward = adv_agent_r_max - agent_r_avg
+
+      # Add adversary block budget.
+      env_reward += self.compute_adversary_block_budget(
+          adv_agent_r_max, env_idx)
+
+    # Minimax adversary reward.
+    else:
+      env_reward = -agent_r_avg
+
+    self.adversary_env[env_idx].final_reward = env_reward
+
+    # Log metrics to tensorboard.
+    if self.collect:
+      self.adversary_env[env_idx].env_train_metric(env_reward)
+    else:
+      self.adversary_env[env_idx].env_eval_metric(env_reward)
+
+    # Log metrics to console.
+    if self.debug:
+      logging.info('Agent reward: avg = %f, max = %f',
+                   tf.reduce_mean(agent_r_avg).numpy(),
+                   tf.reduce_mean(agent_r_max).numpy())
+      logging.info('Environment score: %f',
+                   tf.reduce_mean(env_reward).numpy())
+      if self.adversary_agent:
+        logging.info('Adversary agent reward: avg = %f, max = %f',
+                     tf.reduce_mean(adv_agent_r_avg).numpy(),
+                     tf.reduce_mean(adv_agent_r_max).numpy())
+
+    return agent_r_max, train_idxs
 
   def combined_population_adversarial_domain_randomization_episode(self):
     """The novel method that combine adversary constructs environment with domain randomization and play it."""
     # Build environment with adversary.
-
-    pre_env_diffc = get_env_value()
-    env_infos = []
-    vs = []
-    min_env_idx = 0
-    min_env_diff_v = tf.constant(np.inf)
-    for env_idx_itr in range(len(self.adversary_env)):
+    if self.has_training:
+      pre_env_diffc = self.pre_env_diffc
+      env_infos = []
+      # vs = []
+      min_env_idx = 0
+      # min_env_diff_v = tf.constant(-1.0)
+      min_env_diff_v = tf.constant(np.inf)
+      for env_idx_itr in range(len(self.adversary_env)):
+        _, _, env_idx = self.run_agent(
+            self.env, self.adversary_env, self.env.reset, self.env.step_adversary, env_idx_itr)
+        
+        env_infos.append(self.env.get_infos())
+        tmp_v = tf.math.abs(self.get_env_value() - pre_env_diffc)
+        # vs.append(tmp_v)
+        
+        # print('prepare to choose:')
+        # print(min_env_diff_v, tmp_v)
+        if (tmp_v < min_env_diff_v).numpy().any():
+          min_env_diff_v = tmp_v
+          min_env_idx = env_idx_itr
+      for env_idx_itr in range(len(self.adversary_env)):
+        if env_idx_itr == min_env_idx:
+          continue
+        self.adversary_env[env_idx_itr].replay_buffer.clear()
+      env_idx = min_env_idx
+      self.env.reset_agent_given_info(env_infos[env_idx])
+    else:
       _, _, env_idx = self.run_agent(
-          self.env, self.adversary_env, self.env.reset, self.env.step_adversary, env_idx_itr)
-      
-      env_infos.append(self.env.get_infos())
-      tmp_v = tf.math.abs(get_env_value() - pre_env_diffc)
-      vs.append(tmp_v)
-
-      if tmpv < min_env_diff_v:
-        min_env_diff_v = tmpv
-        min_env_idx = env_idx_itr
-    env_idx = min_env_idx
-    self.env.reset_agent_given_info(env_infos[env_idx])
+        self.env, self.adversary_env, self.env.reset, self.env.step_adversary)
+      self.has_training = True
+    
+    # print('in training!!')
 
     train_idxs = {'adversary_env': [env_idx], 'agent': []}
 
@@ -260,6 +393,8 @@ class AdversarialDriver(object):
                    tf.reduce_max(population_max).numpy())
       logging.info('Environment regret: %f',
                    tf.reduce_mean(regret).numpy())
+
+    self.pre_env_diffc = self.get_env_value()
 
     return population_max, train_idxs
 
@@ -462,9 +597,10 @@ class AdversarialDriver(object):
       avg_reward += next_time_step.reward
       tmp_reward += next_time_step.reward
 
-      if traj.is_last():
-        max_reward = tf.math.maximum(max_reward, tmp_reward)
-        tmp_reward = tf.zeros_like(time_step.reward)
+      cur_last_v = tf.cast(traj.is_last(), tf.float32)
+      max_reward = tf.math.maximum(max_reward, tmp_reward * cur_last_v)
+      # tmp_reward = tf.zeros_like(time_step.reward)
+      tmp_reward = (tf.ones_like(tmp_reward) - cur_last_v) *  tmp_reward
 
       for observer in observers:
         observer(traj)

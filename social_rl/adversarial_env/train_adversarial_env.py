@@ -98,6 +98,10 @@ flags.DEFINE_boolean('combined_population', False,
                      'If True, will have a single population of agents. Which'
                      'agent is the antagonist depends on which gets the highest'
                      'score for a given round.')
+flags.DEFINE_boolean('traditional_regret', False,
+                     'If True, will have a single population of agents. Which'
+                     'agent is the antagonist depends on which gets the highest'
+                     'score for a given round.')
 flags.DEFINE_float('block_budget_weight', 0.,
                    'Coefficient used to impose block budget on the adversary.')
 FLAGS = flags.FLAGS
@@ -127,11 +131,12 @@ def train_eval(
     protagonist_population_size=1,
     antagonist_population_size=1,
     combined_population=False,
+    traditional_regret=False,
     block_budget_weight=0,
     # Agent architecture params
     actor_fc_layers=(32, 32),
     value_fc_layers=(32, 32),
-    lstm_size=(128,),
+    lstm_size=(256,),
     conv_filters=8,
     conv_kernel=3,
     direction_fc=5,
@@ -140,7 +145,7 @@ def train_eval(
     adversary_env_rnn=True,
     adv_actor_fc_layers=(32, 32),
     adv_value_fc_layers=(32, 32),
-    adv_lstm_size=(128,),
+    adv_lstm_size=(256,),
     adv_conv_filters=16,
     adv_conv_kernel=3,
     adv_timestep_fc=10,
@@ -246,7 +251,7 @@ def train_eval(
     for agent_name in ['agent', 'adversary_agent']:
       if (agent_name == 'adversary_agent' and
           (domain_randomization or unconstrained_adversary or
-           combined_population)):
+           combined_population) and (not traditional_regret)):
         # Antagonist agent not needed for baselines
         continue
 
@@ -292,7 +297,7 @@ def train_eval(
             debug_summaries=debug_summaries,
             summarize_grads_and_vars=summarize_grads_and_vars))
 
-    if (not domain_randomization) or combined_population:
+    if (not domain_randomization) or combined_population or traditional_regret:
       xy_dim = None
       if 'Reparam' in env_name:
         xy_dim = gym_env.width
@@ -336,7 +341,7 @@ def train_eval(
             summarize_grads_and_vars=summarize_grads_and_vars))
 
     logging.info('Creating adversarial drivers')
-    if unconstrained_adversary or domain_randomization or combined_population:
+    if (unconstrained_adversary or domain_randomization or combined_population) and (not traditional_regret):
       adversary_agent = None
     else:
       adversary_agent = agents['adversary_agent']
@@ -356,6 +361,8 @@ def train_eval(
         disable_tf_function=True,  # TODO(natashajaques): enable tf functions
         debug=debug,
         combined_population=combined_population,
+        nearest_metric=combined_population and domain_randomization,
+        use_traditional_regret=traditional_regret,
         flexible_protagonist=flexible_protagonist)
     eval_driver = adversarial_driver.AdversarialDriver(
         eval_tf_env,
@@ -367,6 +374,8 @@ def train_eval(
         disable_tf_function=True,  # TODO(natashajaques): enable tf functions
         debug=False,
         combined_population=combined_population,
+        nearest_metric=combined_population and domain_randomization,
+        use_traditional_regret=traditional_regret,
         flexible_protagonist=flexible_protagonist)
 
     collect_time = 0
@@ -550,6 +559,7 @@ def main(_):
       protagonist_population_size=FLAGS.protagonist_population_size,
       antagonist_population_size=FLAGS.antagonist_population_size,
       combined_population=FLAGS.combined_population,
+      traditional_regret=FLAGS.traditional_regret,
       block_budget_weight=FLAGS.block_budget_weight,
       num_train_steps=FLAGS.num_train_steps,
       collect_episodes_per_iteration=FLAGS.collect_episodes_per_iteration,

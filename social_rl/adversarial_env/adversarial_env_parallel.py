@@ -172,7 +172,7 @@ class AdversarialParallelPyEnvironment(py_environment.PyEnvironment):
   def reset_agent_given_info(self, infoset):
     time_steps = []
     for env_i in range(len(self._envs)):
-      time_steps.append(self._envs[env_i].reset_agent_given_info(infoset[env_i]))
+      time_steps.append(self._envs[env_i].reset_agent_given_info(infoset[env_i], self._blocking))
       
     if not self._blocking:
       time_steps = [promise() for promise in time_steps]
@@ -480,6 +480,13 @@ class AdversarialProcessPyEnvironment(object):
 
   def step_adversary(self, action, blocking=True):
     promise = self.call('step_adversary', action)
+    if blocking:
+      return promise()
+    else:
+      return promise
+  
+  def reset_agent_given_info(self, infoset, blocking=True):
+    promise = self.call('reset_agent_given_info', infoset)
     if blocking:
       return promise()
     else:
