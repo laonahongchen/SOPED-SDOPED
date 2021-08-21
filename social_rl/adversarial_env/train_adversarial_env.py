@@ -99,9 +99,9 @@ flags.DEFINE_boolean('combined_population', False,
                      'agent is the antagonist depends on which gets the highest'
                      'score for a given round.')
 flags.DEFINE_boolean('traditional_regret', False,
-                     'If True, will have a single population of agents. Which'
-                     'agent is the antagonist depends on which gets the highest'
-                     'score for a given round.')
+                     'If True, will use the traditional regret in PAIRED rather than the population one. This is only useful when used without domain randomization and population based method.')
+flags.DEFINE_boolean('use_dpp', False,
+                     'If True, will use the DPP method to re-rank the potential environments. This will automatically use population based method on the environment part.')
 flags.DEFINE_float('block_budget_weight', 0.,
                    'Coefficient used to impose block budget on the adversary.')
 FLAGS = flags.FLAGS
@@ -132,6 +132,7 @@ def train_eval(
     antagonist_population_size=1,
     combined_population=False,
     traditional_regret=False,
+    use_dpp=False,
     block_budget_weight=0,
     # Agent architecture params
     actor_fc_layers=(32, 32),
@@ -146,7 +147,7 @@ def train_eval(
     adv_actor_fc_layers=(32, 32),
     adv_value_fc_layers=(32, 32),
     adv_lstm_size=(256,),
-    adv_conv_filters=16,
+    adv_conv_filters=128,
     adv_conv_kernel=3,
     adv_timestep_fc=10,
     adv_entropy_regularization=0.,
@@ -363,6 +364,7 @@ def train_eval(
         combined_population=combined_population,
         nearest_metric=combined_population and domain_randomization,
         use_traditional_regret=traditional_regret,
+        use_dpp=use_dpp,
         flexible_protagonist=flexible_protagonist)
     eval_driver = adversarial_driver.AdversarialDriver(
         eval_tf_env,
@@ -376,6 +378,7 @@ def train_eval(
         combined_population=combined_population,
         nearest_metric=combined_population and domain_randomization,
         use_traditional_regret=traditional_regret,
+        use_dpp=use_dpp,
         flexible_protagonist=flexible_protagonist)
 
     collect_time = 0
@@ -560,6 +563,7 @@ def main(_):
       antagonist_population_size=FLAGS.antagonist_population_size,
       combined_population=FLAGS.combined_population,
       traditional_regret=FLAGS.traditional_regret,
+      use_dpp=FLAGS.use_dpp,
       block_budget_weight=FLAGS.block_budget_weight,
       num_train_steps=FLAGS.num_train_steps,
       collect_episodes_per_iteration=FLAGS.collect_episodes_per_iteration,

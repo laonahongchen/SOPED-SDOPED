@@ -1158,7 +1158,9 @@ class MultiGridEnv(minigrid.MiniGridEnv):
     # Render the whole grid
     img = self.grid.render(tile_size, highlight_mask=highlight_mask)
 
+    # print('in the render now!!--------------------------', mode)
     if mode == 'human':
+      # print('mode: human!!!!')
       self.window.show_img(img)
       self.window.set_caption(self.mission)
 
